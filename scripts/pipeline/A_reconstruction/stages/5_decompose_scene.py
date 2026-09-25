@@ -812,8 +812,15 @@ from simfoundry import CFG_DIR
 
 @hydra.main(config_name="real2sim_cfg", config_path=CFG_DIR, version_base="1.3")
 def main(cfg):
-    raw_img_dir = f"{cfg.s1_video.out_dir}/frames_subsampled_{cfg.s1_video.n_subsampled_frames}"
-    raw_imgs = list(sorted([f"{raw_img_dir}/{fname}" for fname in os.listdir(raw_img_dir) if fname.endswith(".png")]))
+    # Stereo captures (stage 1a + FoundationStereo) keep full-resolution left images in
+    # s1_zed and per-frame depth/K/rgb in s2_fs; video captures use s1_video + DA3.
+    use_fs = cfg.s3_ground.get("use_fs", False)
+    if use_fs:
+        raw_img_dir = None
+        raw_imgs = None
+    else:
+        raw_img_dir = f"{cfg.s1_video.out_dir}/frames_subsampled_{cfg.s1_video.n_subsampled_frames}"
+        raw_imgs = list(sorted([f"{raw_img_dir}/{fname}" for fname in os.listdir(raw_img_dir) if fname.endswith(".png")]))
     source_dir = cfg.s2_da.out_dir
     # source_image_fpath = f"{cfg.s1_zed.out_dir}/{cfg.s5_scene.img_name}_l.png"
     out_dir = cfg.s5_scene.out_dir
@@ -962,7 +969,10 @@ def main(cfg):
     # Load raw inputs
     # Make sure to resize image first so that it's standardized with Imagen native resolutions
     padding_color = (255, 255, 255)
-    original_img = np.array(Image.open(raw_imgs[scene_img_idx]))
+    if use_fs:
+        original_img = np.array(Image.open(f"{cfg.s1_zed.out_dir}/image_{scene_img_idx}_l.png").convert("RGB"))
+    else:
+        original_img = np.array(Image.open(raw_imgs[scene_img_idx]))
     original_H, original_W, _ = original_img.shape
     original_ratio = original_W / original_H
     ratio_options = {w / h: (w, h) for (w, h) in removal_model.IMAGE_SHAPES}
@@ -1026,9 +1036,14 @@ def main(cfg):
         Image.fromarray(upsampled_obj_img_raw).save(source_resized_upsampled_image_fpath)
 
     # Load the rotated point cloud (i.e.: "floor" is located at origin and z-direction is aligned with the plane
-    results = np.load(f"{source_dir}/da/exports/npz/results.npz")
-    K = results["intrinsics"][ground_img_idx]
-    np.save(f"{out_dir}/original_depth.npy", results["depth"][scene_img_idx])
+    if use_fs:
+        fs_dir = cfg.s2_fs.out_dir
+        K = np.load(f"{fs_dir}/image_{ground_img_idx}_K.npy")
+        np.save(f"{out_dir}/original_depth.npy", np.load(f"{fs_dir}/image_{scene_img_idx}_depth_meter.npy"))
+    else:
+        results = np.load(f"{source_dir}/da/exports/npz/results.npz")
+        K = results["intrinsics"][ground_img_idx]
+        np.save(f"{out_dir}/original_depth.npy", results["depth"][scene_img_idx])
     # K_fpath = f"{source_dir}/{cfg.s3_ground.img_name}_K.npy"
     # scene_img_name = cfg.s5_scene.img_name
     # K = np.load(K_fpath)
@@ -1041,7 +1056,10 @@ def main(cfg):
     pcd_fpath = f"{cfg.s4_frame.out_dir}/image_{ground_img_idx}_pc_raw_rotated.ply"
     # da_rgb_fpath = f"{cfg.s2_da.out_dir}/image_{ground_img_idx}_rgb.png"
     # da_rgb_img = np.array(Image.open(fs_rgb_fpath))
-    da_rgb_img = results["image"][ground_img_idx]
+    if use_fs:
+        da_rgb_img = np.load(f"{cfg.s2_fs.out_dir}/image_{ground_img_idx}_rgb.npy")
+    else:
+        da_rgb_img = results["image"][ground_img_idx]
     pcd = o3d.io.read_point_cloud(pcd_fpath)
     pc = np.asarray(pcd.points).reshape(*da_rgb_img.shape)  # (H, W, 3)
     padded_pc, (delta_w, delta_h) = pad_image_to_ratio(pc, target_ratio=target_ratio, padding_color=padding_color, return_padding_size=True)
@@ -1122,7 +1140,7 @@ def main(cfg):
     if last_kept_iteration is None:
         current_rgb_fpath = source_resized_upsampled_image_fpath if use_upsampled_source_image else source_resized_image_fpath
         current_rgb = upsampled_obj_img_raw
-        current_depth = results["depth"][scene_img_idx]
+        current_depth = np.load(f"{out_dir}/original_depth.npy")  # saved above for DA and FS inputs
     else:
         current_rgb_fpath = f"{out_dir}/post_object_removal/iter_{last_kept_iteration}.png"
         current_rgb = np.array(Image.open(current_rgb_fpath))

@@ -608,6 +608,23 @@ class Gemini(VLM_API):
             "max_tokens": 65535,
         },
     }
+    def __new__(cls, *args, **kwargs):
+        # SIMFOUNDRY_VLM_BACKEND=codex routes every Gemini use through the Codex CLI
+        # (see simfoundry/models/codex_vlm.py); stages keep constructing Gemini(...).
+        if os.environ.get("SIMFOUNDRY_VLM_BACKEND", "gemini").lower() == "codex":
+            from simfoundry.models.codex_vlm import CodexVLM
+
+            model = kwargs.get("model", args[2] if len(args) > 2 else "gemini-3-pro-image")
+            assert_valid_key(key=model, valid_keys=cls.VERSIONS, name="Gemini model")
+            return CodexVLM(
+                gemini_model=model,
+                image_output="IMAGE" in cls.VERSIONS[model]["modalities"],
+                image_shapes=cls.IMAGE_SHAPES,
+                resolutions=cls.RESOLUTIONS,
+                verbose=kwargs.get("verbose", False),
+            )
+        return super().__new__(cls)
+
     def __init__(
         self,
         project=None,

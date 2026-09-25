@@ -288,6 +288,27 @@ def main(cfg):
                         visualize=cfg.visualize,
                         **shape_gen_kwargs,
                     )
+                if generation_mode == GenerationMode.SHAPE_ONLY:
+                    # Stages 8 and 11 read <texture_dir>/<name>_mesh.glb. Publish the
+                    # untextured shape there so shape-only runs (e.g. a quick geometry
+                    # preview before the texture model is available) reach stages 8-12.
+                    # Raw marching-cubes shapes run to millions of faces, too many for
+                    # FoundationPose's rasterizer; texturing normally remeshes them, so reduce
+                    # them here the same way.
+                    import trimesh as _trimesh
+                    shape = _trimesh.load(job.shape_fpath, force="mesh")
+                    try:
+                        from hy3dshape.postprocessors import (
+                            DegenerateFaceRemover, FaceReducer, FloaterRemover,
+                        )
+                        shape = FaceReducer()(
+                            DegenerateFaceRemover()(FloaterRemover()(shape)),
+                            max_facenum=cfg.s7_mesh.get("shape_only_max_faces", 40000),
+                        )
+                    except ImportError:
+                        logger.warning("hy3dshape unavailable; publishing %s unreduced", job.mesh_name)
+                    Path(job.texture_fpath).parent.mkdir(parents=True, exist_ok=True)
+                    shape.export(job.texture_fpath)
                 if generation_mode in {GenerationMode.SHAPE_TEXTURE_SEPARATE_MODELS, GenerationMode.TEXTURE_ONLY}:
                     texture_generator.generate_texture(
                         shape_fpath=job.shape_fpath,
