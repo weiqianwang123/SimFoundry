@@ -272,13 +272,13 @@ class FoundationStereoBackend(DepthBackend):
         from Utils import set_logging_format, set_seed, vis_disparity, depth2xyzmap, toOpen3dCloud
 
         img_dir = cfg.s1_zed.out_dir
+        # Only complete pairs: a capture may mix stereo frames with RGB-D frames whose
+        # depth is already in s2_fs (left image only).
+        files = set(os.listdir(img_dir))
         names = sorted(
-            {
-                file.split(suffix)[0]
-                for file in os.listdir(img_dir)
-                for suffix in ["_l.png", "_r.png"]
-                if file.endswith(suffix)
-            }
+            file[: -len("_l.png")]
+            for file in files
+            if file.endswith("_l.png") and file[: -len("_l.png")] + "_r.png" in files
         )
 
         out_dir = Path(cfg.s2_fs.out_dir)
@@ -344,7 +344,12 @@ class FoundationStereoBackend(DepthBackend):
                 disp[invalid] = np.inf
 
             if args.get_pc:
-                with open(args.intrinsic_file, "r", encoding="utf-8") as f:
+                # Per-image intrinsics (K, baseline) when frames come from several stereo
+                # cameras; otherwise the shared intrinsic.txt.
+                intrinsic_file = f"{img_dir}/{name}_intrinsic.txt"
+                if not os.path.exists(intrinsic_file):
+                    intrinsic_file = args.intrinsic_file
+                with open(intrinsic_file, "r", encoding="utf-8") as f:
                     lines = f.readlines()
                     k = np.array(list(map(float, lines[0].rstrip().split()))).astype(np.float32).reshape(3, 3)
                     baseline = float(lines[1])

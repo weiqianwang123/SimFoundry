@@ -81,6 +81,11 @@ def parse_articulated_object_selection(
 
 def get_articulation_query_image_path(cfg) -> str | None:
     """Use the same source scene frame that stage 5 uses for VLM scene decomposition."""
+    if cfg.s3_ground.get("use_fs", False):
+        # Stereo / RGB-D captures: stage 5 reads the left image from s1_zed.
+        img_idx = resolve_img_idx(cfg, stage_key="s5_scene")
+        path = Path(cfg.s1_zed.out_dir) / f"image_{img_idx}_l.png"
+        return str(path) if path.exists() else None
     # img_idx indexes the subsampled frame set, which is what stage 5 reads -- indexing
     # frames_all instead only happened to agree with stage 5 when img_idx was 0.
     raw_img_dir = Path(cfg.s1_video.out_dir) / f"frames_subsampled_{cfg.s1_video.n_subsampled_frames}"

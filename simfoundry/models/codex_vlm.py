@@ -138,9 +138,13 @@ class CodexVLM:
         seed=0,
         n_retries=3,
         print_results=False,
+        system_prompt=None,
     ):
-        """Same arguments as ``Gemini.__call__``; sampling controls are ignored."""
+        """Same arguments as ``Gemini.__call__`` (SimFoundry's, and articulate-anything's
+        with its ``system_prompt``); sampling controls are ignored."""
         del temperature, top_p, seed  # no Codex equivalent
+        if system_prompt:
+            prompt = f"<system_instruction>\n{system_prompt}\n</system_instruction>\n\n{prompt}"
         if image_paths is None:
             image_paths = []
         elif isinstance(image_paths, (str, os.PathLike)):
@@ -248,3 +252,30 @@ class CodexVLM:
     def get_result_images(self, result):
         """The response images (PIL)."""
         return list(result.images)
+
+
+class ArticulateCodexVLM(CodexVLM):
+    """:class:`CodexVLM` with articulate-anything's ``Gemini.__call__`` signature,
+    whose second positional argument is the system prompt."""
+
+    def __call__(  # pylint: disable=arguments-differ
+        self,
+        prompt,
+        system_prompt=None,
+        image_paths=None,
+        temperature=0,
+        top_p=0,
+        seed=0,
+        n_retries=3,
+        print_results=False,
+    ):
+        return super().__call__(
+            prompt,
+            image_paths=image_paths,
+            temperature=temperature,
+            top_p=top_p,
+            seed=seed,
+            n_retries=n_retries,
+            print_results=print_results,
+            system_prompt=system_prompt,
+        )

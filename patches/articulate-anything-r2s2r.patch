@@ -1,0 +1,117 @@
+diff --git a/articulate_anything/utils/prompt_utils.py b/articulate_anything/utils/prompt_utils.py
+index 7aeb16b..c145cbb 100644
+--- a/articulate_anything/utils/prompt_utils.py
++++ b/articulate_anything/utils/prompt_utils.py
+@@ -115,7 +115,13 @@ def setup_gemini(model_name, system_instruction=None, api_key=None, cfg=None):
+     """Build the agent's Gemini client, honouring an API key or Vertex ADC.
+ 
+     Returns None when neither is configured -- callers treat that as "no model".
++    With SIMFOUNDRY_VLM_BACKEND=codex (SimFoundry's r2s2r fork), a stand-in client
++    answers through the Codex CLI instead.
+     """
++    if os.environ.get("SIMFOUNDRY_VLM_BACKEND", "gemini").lower() == "codex":
++        from simfoundry.models.codex_genai import CodexGenAIClient
++
++        return CodexGenAIClient(model_name)
+     try:
+         client_kwargs, _route = resolve_gemini_auth(
+             project=_cfg_attr(cfg, "gcloud_project"),
+diff --git a/articulate_anything/utils/vlm.py b/articulate_anything/utils/vlm.py
+index 496f812..83f980c 100644
+--- a/articulate_anything/utils/vlm.py
++++ b/articulate_anything/utils/vlm.py
+@@ -1,5 +1,6 @@
+ import base64
+ import logging
++import os
+ from io import BytesIO
+ from google import genai
+ from google.genai.types import RawReferenceImage, MaskReferenceImage, MaskReferenceConfig, EditImageConfig, Image, \
+@@ -98,6 +99,22 @@ class Gemini(VLM_API):
+             "max_tokens": 32768,
+         },
+     }
++    def __new__(cls, *args, **kwargs):
++        # SimFoundry's r2s2r fork: SIMFOUNDRY_VLM_BACKEND=codex answers through the
++        # Codex CLI (simfoundry/models/codex_vlm.py, on PYTHONPATH from stage 9).
++        if os.environ.get("SIMFOUNDRY_VLM_BACKEND", "gemini").lower() == "codex":
++            from simfoundry.models.codex_vlm import ArticulateCodexVLM
++
++            model = kwargs.get("model", args[2] if len(args) > 2 else "gemini-2.5-pro")
++            return ArticulateCodexVLM(
++                gemini_model=model,
++                image_output="IMAGE" in cls.VERSIONS.get(model, {}).get("modalities", []),
++                image_shapes=cls.IMAGE_SHAPES,
++                resolutions=cls.RESOLUTIONS,
++                verbose=kwargs.get("verbose", False),
++            )
++        return super().__new__(cls)
++
+     def __init__(
+         self,
+         project=None,
+diff --git a/simfoundry/render.py b/simfoundry/render.py
+index 1ed6c7b..020729f 100644
+--- a/simfoundry/render.py
++++ b/simfoundry/render.py
+@@ -12,6 +12,24 @@ import shutil
+ from omegaconf import DictConfig
+ 
+ 
++
++def _node_pose(scene, geom_name):
++    """Pose to render a geometry at: its node's transform, identity when it has none.
++    Camera placement uses the transformed scene (extents, centroid), and SimFoundry's
++    canonical meshes keep their scale and uprighting rotation in the scene graph."""
++    try:
++        return _geometry_transform(scene, geom_name)
++    except (KeyError, ValueError):
++        return np.eye(4)
++
++
++def _geometry_transform(scene, geom_name):
++    """World transform of a scene geometry. GLB node names can differ from geometry
++    names (node "textured_mesh" holding geometry "textured_mesh.001")."""
++    nodes = scene.graph.geometry_nodes.get(geom_name) or [geom_name]
++    transform, _ = scene.graph[nodes[0]]
++    return transform
++
+ def add_part_labels(img, scene, part_info, camera_transform, resolution, render_buffers=None, verbose=False):
+     """
+     Add numerical labels to each part in the rendered image.
+@@ -796,7 +814,7 @@ def render_scene_with_labels(scene, part_info, camera_angles, output_dir,
+                     # Get transform from scene graph
+                     # The graph stores (transform, parent_node) for each node
+                     try:
+-                        transform, _ = loaded.graph[geom_name]
++                        transform = _geometry_transform(loaded, geom_name)
+                         if transform is not None and not np.allclose(transform, np.eye(4)):
+                             if verbose:
+                                 print(f"  Applying scene graph transform to geometry")
+@@ -812,7 +830,7 @@ def render_scene_with_labels(scene, part_info, camera_angles, output_dir,
+                     for geom_name in geom_names:
+                         geom = loaded.geometry[geom_name].copy()
+                         try:
+-                            transform, _ = loaded.graph[geom_name]
++                            transform = _geometry_transform(loaded, geom_name)
+                             if transform is not None and not np.allclose(transform, np.eye(4)):
+                                 geom.apply_transform(transform)
+                         except (KeyError, TypeError, ValueError):
+@@ -1032,7 +1050,7 @@ def render_with_pyrender_offscreen(scene, camera_transform, resolution, verbose=
+                 # Convert to pyrender mesh and add to scene
+                 try:
+                     pr_mesh = pyrender.Mesh.from_trimesh(mesh_to_render, smooth=False)
+-                    pr_scene.add(pr_mesh)
++                    pr_scene.add(pr_mesh, pose=_node_pose(scene, geom_name))
+                 except Exception as e:
+                     # Fallback: create mesh without colors
+                     if verbose:
+@@ -1043,7 +1061,7 @@ def render_with_pyrender_offscreen(scene, camera_transform, resolution, verbose=
+                         process=False
+                     )
+                     pr_mesh = pyrender.Mesh.from_trimesh(plain_mesh, smooth=False)
+-                    pr_scene.add(pr_mesh)
++                    pr_scene.add(pr_mesh, pose=_node_pose(scene, geom_name))
+         
+         # Check if any meshes were added
+         if len(pr_scene.meshes) == 0:
