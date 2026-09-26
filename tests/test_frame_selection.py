@@ -523,3 +523,67 @@ def test_the_hinted_support_wins_over_the_largest_surface():
     assert phrase == "white side table"
     none = frame_selection.segment_hinted_support(img, _FakeSAM3(), ["desk"], box_2d=[0, 0, 5, 5])
     assert len(none[0]) == 0
+
+
+class _PickySAM3:
+    """Segments a surface only in bright images, and records its threshold at each call."""
+
+    def __init__(self):
+        self.model = type("Processor", (), {"confidence_threshold": 0.5})()
+        self.thresholds = []
+
+    def predict_segmentation(self, pil_img, text_prompt):
+        self.thresholds.append(self.model.confidence_threshold)
+        width, height = pil_img.size
+        if np.asarray(pil_img).mean() == 0:
+            return np.zeros((0, 1, height, width), bool), np.zeros((0, 4)), np.zeros(0)
+        masks = np.ones((1, 1, height, width), bool)
+        return masks, np.array([[0, 0, width, height]], float), np.array([0.3])
+
+
+def test_codex_mode_goes_down_the_ranking_to_a_segmentable_support(tmp_path, monkeypatch):
+    cfg = _codex_cfg(tmp_path)
+    answer = json.dumps({
+        "option": 1,
+        "ranking": [1, 2, 3],
+        "support": {"description": "white table", "boxes": {"1": [0, 0, 1000, 1000], "2": [0, 0, 1000, 1000]}},
+        "reason": "option 1 is the closest",
+    })
+    _stub_codex(monkeypatch, answer)
+    bundle = _fake_bundle(3)
+    bundle.rgbs = [np.zeros((20, 20, 3), np.uint8)] + [np.full((20, 20, 3), 200, np.uint8)] * 2
+    sam3 = _PickySAM3()
+    # A level support plane in front of the camera (depth 1 m everywhere).
+    bundle.depths = [np.ones((20, 20)) for _ in range(3)]
+    bundle.intrinsics = [np.array([[20.0, 0, 10], [0, 20.0, 10], [0, 0, 1]])] * 3
+    selection = frame_selection.select_with_codex(cfg, bundle, [0, 1, 2], selection_cfg(cfg), sam3)
+    assert selection.selected_idx == 1  # option 1's surface could not be segmented
+    assert selection.support == {"description": "white table", "box_2d": [0.0, 0.0, 1000.0, 1000.0]}
+    assert "took option 2" in selection.vlm_note
+    assert "option 1 unusable" in selection.vlm_note
+    # Low-confidence masks count while matching the box, and the threshold is restored.
+    assert set(sam3.thresholds) == {0.2} and sam3.model.confidence_threshold == 0.5
+
+
+def test_parse_codex_selection_reads_a_box_per_option():
+    answer = frame_selection.parse_codex_selection(
+        json.dumps({"option": 2, "ranking": [2, 1], "support": {
+            "description": "table", "boxes": {"2": [0, 0, 500, 500], "1": [0, 0, 5000, 1], "9": [0, 0, 1, 1]}}}),
+        n_options=3,
+    )
+    assert answer["support"]["boxes"] == {2: [0.0, 0.0, 500.0, 500.0]}
+
+
+def test_codex_mode_skips_a_frame_whose_support_plane_is_rolled(tmp_path, monkeypatch):
+    pytest.importorskip("open3d")
+    cfg = _codex_cfg(tmp_path)
+    boxes = {"1": [0, 0, 1000, 1000], "2": [0, 0, 1000, 1000]}
+    _stub_codex(monkeypatch, json.dumps({"option": 1, "ranking": [1, 2], "support": {"description": "table", "boxes": boxes}}))
+    bundle = _fake_bundle(2)
+    bundle.rgbs = [np.full((20, 20, 3), 200, np.uint8)] * 2
+    v, u = np.mgrid[0:20, 0:20]
+    bundle.depths = [1.0 + 0.02 * (u - 10.0), np.ones((20, 20))]  # frame 0: a plane rolled about the view axis
+    bundle.intrinsics = [np.array([[20.0, 0, 10], [0, 20.0, 10], [0, 0, 1]])] * 2
+    selection = frame_selection.select_with_codex(cfg, bundle, [0, 1], selection_cfg(cfg), _PickySAM3())
+    assert selection.selected_idx == 1 and "option 1 unusable" in selection.vlm_note
+

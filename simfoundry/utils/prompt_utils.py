@@ -388,13 +388,13 @@ Exactly one of these frames will be used to rebuild the scene in simulation: eve
 
 Decide:
 1. The support surface: the surface the objects of interest rest on (a table, desk, counter, the floor, ...). Other surfaces may be in view, such as the stand or table the robot is mounted on, or furniture nearby; choose the one the objects of interest stand on, whatever its size.
-2. The frame that rebuilds those objects best: each of them fully visible and not hidden behind another object or the robot; as large in the image as possible (the smallest object matters most); sharp; not cut by the image border; the support surface clearly visible.
-3. In that frame, the support surface: a short description that a text-prompted segmentation model can find (colour, shape, material; e.g. "white square side table"), and its bounding box.
-4. A ranking of every usable option, best first. Leave out options in which the support surface or an object of interest is not properly in view.
+2. The frame that rebuilds those objects best. Each object's 3D shape is generated from this one image alone, so the frame must show each object's shape: prefer a view from the side or at an angle, which shows each object's sides as well as its top, over a view from straight or nearly straight above, which hides the objects' height and shape. Then: each object fully visible and not hidden behind another object or the robot; as large in the image as possible (the smallest object matters most); sharp; not cut by the image border; the support surface clearly visible.
+3. A ranking of every usable option, best first, starting with your choice. Leave out options in which the support surface or an object of interest is not properly in view.
+4. The support surface: a short description that a text-prompted segmentation model can find (colour, shape, material; e.g. "white square side table"), and its bounding box in every option of your ranking (the frame used is the first one in which it can be segmented).
 
 Answer with JSON only, in this form:
-{{"option": <number>, "ranking": [<numbers>], "objects": [<short names of the objects of interest>], "support": {{"description": "<text>", "box_2d": [<ymin>, <xmin>, <ymax>, <xmax>]}}, "reason": "<one or two sentences>"}}
-where box_2d is the support surface's bounding box in the chosen option, each value an integer from 0 to 1000 relative to that image's height (y) and width (x)."""
+{{"option": <number>, "ranking": [<numbers>], "objects": [<short names of the objects of interest>], "support": {{"description": "<text>", "boxes": {{"<option number>": [<ymin>, <xmin>, <ymax>, <xmax>], ...}}}}, "reason": "<one or two sentences>"}}
+where each box is the support surface's bounding box in that option, each value an integer from 0 to 1000 relative to that image's height (y) and width (x)."""
 
 
 def prompt_object_mass_friction(obj_phrase, bounding_box_cm, volume_cm):

@@ -37,11 +37,12 @@ counter. The VLM step is fail-soft: no credentials or a failed call just keeps t
 winner.
 
 With `mode: codex` there is no heuristic: Codex sees every candidate frame (and the task,
-`frame_selection.task`, when given) and chooses both the frame and the support surface in it,
-which it names and boxes. Stage 3 then segments that surface rather than the largest one,
-since the largest table-like surface in view need not be the one the objects stand on (the
-stand a robot is mounted on, for one). If Codex fails or answers unusably, selection falls
-back to `hybrid`.
+`frame_selection.task`, when given), ranks the usable ones, and names the support surface the
+objects stand on, with its box in each ranked frame. The first frame in that ranking whose
+surface SAM3 segments where Codex boxed it, with a plane inside stage 3's roll limit, is
+used. Stage 3 then segments that surface rather than the largest one, since the largest
+table-like surface in view need not be the one the objects stand on (the stand a robot is
+mounted on, for one). If Codex fails or answers unusably, selection falls back to `hybrid`.
 
 The chosen index is written to `<s3_ground.out_dir>/frame_selection.json`; every downstream
 stage reads it back through `resolve_img_idx` so the whole pipeline stays on one frame.
@@ -655,9 +656,19 @@ def _ask_codex(cfg, prompt: str, image_fpaths: Sequence[str], sel_cfg: dict[str,
     return vlm.get_result_text(vlm(prompt=prompt, image_paths=list(image_fpaths)))
 
 
+def _valid_box(box) -> bool:
+    return (
+        isinstance(box, (list, tuple)) and len(box) == 4
+        and all(isinstance(v, (int, float)) for v in box)
+        and all(0 <= v <= 1000 for v in box)
+        and box[0] < box[2] and box[1] < box[3]
+    )
+
+
 def parse_codex_selection(text: str, n_options: int) -> dict[str, Any] | None:
-    """The chosen option, the ranking and the support surface from Codex's JSON answer; None
-    when the answer names no valid option. An unusable support box is dropped, not fatal."""
+    """The chosen option, the ranking and the support surface (a description, and its box
+    in each ranked option) from Codex's JSON answer; None when the answer names no valid
+    option. Unusable boxes are dropped, not fatal."""
     import json
 
     start, end = text.find("{"), text.rfind("}")
@@ -681,17 +692,21 @@ def parse_codex_selection(text: str, n_options: int) -> dict[str, Any] | None:
     if option not in ranking:
         ranking.insert(0, option)
     support = answer.get("support") or {}
-    box = support.get("box_2d")
     description = str(support.get("description") or "").strip()
-    valid_box = (
-        isinstance(box, (list, tuple)) and len(box) == 4
-        and all(isinstance(v, (int, float)) and 0 <= v <= 1000 for v in box)
-        and box[0] < box[2] and box[1] < box[3]
-    )
+    boxes = {}
+    for key, box in (support.get("boxes") or {}).items():
+        try:
+            key = int(key)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= key <= n_options and _valid_box(box):
+            boxes[key] = [float(v) for v in box]
+    if option not in boxes and _valid_box(support.get("box_2d")):
+        boxes[option] = [float(v) for v in support["box_2d"]]
     return {
         "option": option,
         "ranking": ranking,
-        "support": {"description": description, "box_2d": [float(v) for v in box]} if description and valid_box else None,
+        "support": {"description": description, "boxes": boxes} if description and boxes else None,
         "reason": str(answer.get("reason") or ""),
     }
 
@@ -701,10 +716,17 @@ def select_with_codex(
     bundle: FrameBundle,
     candidates: Sequence[int],
     sel_cfg: dict[str, Any],
+    sam3=None,
     ask_fn: Callable[..., str] | None = None,
 ) -> FrameSelection | None:
     """Codex chooses the frame and the support surface among every candidate position;
-    None when the call fails or the answer is unusable."""
+    None when the call fails or the answer is unusable.
+
+    With `sam3`, the choice goes down Codex's ranking to the first frame whose support
+    surface SAM3 can segment where Codex boxed it: a frame whose support cannot be
+    segmented would leave stage 3 to guess another surface.
+    """
+    from PIL import Image
     from simfoundry.utils.prompt_utils import prompt_codex_frame_and_support
 
     ask_fn = ask_fn or _ask_codex
@@ -727,18 +749,65 @@ def select_with_codex(
         FrameScore(idx=frame_id, eligible=False, reject_reason="codex: not usable")
         for frame_id in frame_ids if frame_id not in ranked
     ]
-    if answer["support"] is None:
+
+    chosen, support, note = answer["option"], None, answer["reason"]
+    hint = answer["support"]
+    if hint is None:
         logger.warning("Codex gave no usable support box; stage 3 will take the largest surface.")
+    elif sam3 is None:
+        support = {"description": hint["description"], "box_2d": hint["boxes"].get(chosen)}
+    else:
+        prompts = [hint["description"], *OmegaConf.select(cfg, "s3_ground.floor_categories", default=[])]
+        for option in answer["ranking"]:
+            box = hint["boxes"].get(option)
+            if box is None:
+                continue
+            problem = _support_problem(bundle, frame_ids[option - 1], sam3, prompts, box, sel_cfg)
+            if problem is None:
+                if option != chosen:
+                    note = f"{note} [option {chosen} unusable; took option {option}, next in Codex's ranking]"
+                chosen, support = option, {"description": hint["description"], "box_2d": box}
+                break
+            logger.warning("Option %s (frame %s) unusable: %s.", option, frame_ids[option - 1], problem)
+        if support is None:
+            logger.warning("Codex's support surface could not be segmented in any ranked frame.")
+    if support is not None and support["box_2d"] is None:
+        support = None
     return FrameSelection(
-        selected_idx=frame_ids[answer["option"] - 1],
+        selected_idx=frame_ids[chosen - 1],
         mode="codex",
         decided_by="codex",
         n_candidates=len(frame_ids),
         scores=scores,
         vlm_shortlist=frame_ids,
-        vlm_note=answer["reason"],
-        support=answer["support"],
+        vlm_note=note,
+        support=support,
     )
+
+
+def _support_problem(bundle: FrameBundle, frame_id: int, sam3, prompts, box, sel_cfg) -> str | None:
+    """Why stage 3 could not use `frame_id` with this support surface, or None: the surface
+    must segment where Codex boxed it, and its plane must pass stage 3's roll limit."""
+    from PIL import Image
+    from simfoundry.utils.processing_utils import compute_point_cloud_from_depth
+
+    position = bundle.position_of(frame_id)
+    rgb = np.asarray(bundle.rgbs[position])
+    masks = segment_hinted_support(Image.fromarray(rgb), sam3, prompts, box)[0]
+    if not len(masks):
+        return "support surface not segmentable"
+    depth = np.clip(np.asarray(bundle.depths[position]).astype(np.float64), 0.0, None)
+    mask = masks[0][0].astype(bool)
+    if mask.shape != depth.shape:
+        return None  # no depth at the image's resolution to check the plane with
+    points = compute_point_cloud_from_depth(depth=depth, K=np.asarray(bundle.intrinsics[position])).reshape(-1, 3)
+    support_points = points[mask.reshape(-1) & (depth.reshape(-1) > 0)]
+    if len(support_points) < 100:
+        return "support surface has too little depth"
+    normal, _, _ = _fit_support_plane(support_points)
+    if abs(float(normal[0])) > sel_cfg["max_tilt"]:
+        return f"roll {abs(float(normal[0])):.3f} > max_tilt {sel_cfg['max_tilt']:.3f}"
+    return None
 
 
 def _box_iou(a: Sequence[float], b: Sequence[float]) -> float:
@@ -750,22 +819,37 @@ def _box_iou(a: Sequence[float], b: Sequence[float]) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def segment_hinted_support(pil_img, sam3, prompts: Sequence[str], box_2d: Sequence[float], min_iou: float = 0.1):
+def segment_hinted_support(
+    pil_img, sam3, prompts: Sequence[str], box_2d: Sequence[float],
+    min_iou: float = 0.3, min_confidence: float = 0.2,
+):
     """Among SAM3's masks for `prompts`, the one whose box best matches `box_2d` ([ymin, xmin,
     ymax, xmax] in 0..1000 of the image), as stage 3's (masks, boxes_xyxy, logits, phrase);
-    empty when none overlaps it by `min_iou`."""
+    empty when none overlaps it by `min_iou`.
+
+    The box vouches for the surface, so masks down to `min_confidence` count: a close-up
+    view of a tabletop, its edges out of frame, can score low as a "table".
+    """
     width, height = pil_img.size
     hint = [box_2d[1] * width / 1000, box_2d[0] * height / 1000, box_2d[3] * width / 1000, box_2d[2] * height / 1000]
+    processor = getattr(sam3, "model", None)
+    saved = getattr(processor, "confidence_threshold", None)
+    if saved is not None and saved > min_confidence:
+        processor.confidence_threshold = min_confidence
     best = None
-    for prompt in prompts:
-        masks, boxes, logits = sam3.predict_segmentation(pil_img=pil_img, text_prompt=prompt)
-        for i in range(len(masks)):
-            iou = _box_iou(boxes[i], hint)
-            if best is None or iou > best[0]:
-                best = (iou, masks[i:i + 1], boxes[i:i + 1], logits[i:i + 1], prompt)
+    try:
+        for prompt in prompts:
+            masks, boxes, logits = sam3.predict_segmentation(pil_img=pil_img, text_prompt=prompt)
+            for i in range(len(masks)):
+                iou = _box_iou(boxes[i], hint)
+                if best is None or iou > best[0]:
+                    best = (iou, masks[i:i + 1], boxes[i:i + 1], logits[i:i + 1], prompt)
+    finally:
+        if saved is not None:
+            processor.confidence_threshold = saved
     if best is None or best[0] < min_iou:
         return np.zeros((0, 1, height, width), bool), np.zeros((0, 4)), np.zeros(0), None
-    logger.info("Support surface: '%s', box IoU %.2f with Codex's box", best[4], best[0])
+    logger.info("Support surface: '%s' (score %.2f), box IoU %.2f with Codex's box", best[4], float(best[3][0]), best[0])
     return best[1], best[2], best[3], best[4]
 
 
@@ -842,7 +926,7 @@ def select_canonical_frame(
     candidates = list(range(0, n_frames, stride))[:max_candidates]
 
     if sel_cfg["mode"] == "codex":
-        selection = codex_fn(cfg, bundle, candidates, sel_cfg)
+        selection = codex_fn(cfg, bundle, candidates, sel_cfg, sam3)
         if selection is not None:
             logger.info("Codex chose frame %s (support: %s)", selection.selected_idx, selection.support)
             return selection
