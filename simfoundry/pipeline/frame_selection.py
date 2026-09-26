@@ -546,25 +546,29 @@ def rank_frames(scores: Sequence[FrameScore], sel_cfg: dict[str, Any]) -> list[F
 # VLM refinement
 # --------------------------------------------------------------------------------------
 
-def _write_vlm_candidate_images(bundle: FrameBundle, shortlist: Sequence[int], out_dir: str, max_side: int) -> list[str]:
-    """Write one downscaled, corner-labelled image per shortlisted frame."""
+def _write_vlm_candidate_images(
+    bundle: FrameBundle, frame_ids: Sequence[int], out_dir: str, max_side: int, full_res_dir: str | None = None,
+) -> list[str]:
+    """Write one downscaled image per frame, labelled OPTION 1.. in its corner. With
+    `full_res_dir`, stage 1's full-size frame `image_<id>_l.png` there is used when it exists
+    (stereo captures carry no other full-resolution frame)."""
     from PIL import Image, ImageDraw
 
     tmp_dir = Path(out_dir) / "frame_selection_candidates"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     fpaths = []
-    for rank, frame_id in enumerate(shortlist, start=1):
+    for option, frame_id in enumerate(frame_ids, start=1):
         position = bundle.position_of(frame_id)
-        source = bundle.source_fpaths[position]
+        full = f"{full_res_dir}/image_{frame_id}_l.png" if full_res_dir else None
+        source = full if full and os.path.isfile(full) else bundle.source_fpaths[position]
         img = Image.open(source).convert("RGB") if source else Image.fromarray(np.asarray(bundle.rgbs[position]))
         scale = max_side / max(img.size)
         if scale < 1.0:
             img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
         draw = ImageDraw.Draw(img)
-        label = f"OPTION {rank}"
         draw.rectangle([0, 0, 190, 44], fill=(0, 0, 0))
-        draw.text((12, 14), label, fill=(0, 255, 0))
-        fpath = str(tmp_dir / f"option_{rank}_frame_{frame_id}.png")
+        draw.text((12, 14), f"OPTION {option}", fill=(0, 255, 0))
+        fpath = str(tmp_dir / f"option_{option}_frame_{frame_id}.png")
         img.save(fpath)
         fpaths.append(fpath)
     return fpaths
@@ -615,32 +619,6 @@ def refine_with_vlm(cfg, bundle: FrameBundle, shortlist: Sequence[int], sel_cfg:
 # --------------------------------------------------------------------------------------
 # Codex selection: frame and support surface
 # --------------------------------------------------------------------------------------
-
-def _codex_candidate_images(cfg, bundle: FrameBundle, frame_ids: Sequence[int], max_side: int) -> list[str]:
-    """One corner-labelled image per candidate, at the best resolution on disk: stage 1's
-    full-size frame when there is one (stereo captures), else the depth stage's RGB."""
-    from PIL import Image, ImageDraw
-
-    s1_dir = OmegaConf.select(cfg, "s1_zed.out_dir")
-    tmp_dir = Path(cfg.s3_ground.out_dir) / "frame_selection_candidates"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    fpaths = []
-    for option, frame_id in enumerate(frame_ids, start=1):
-        position = bundle.position_of(frame_id)
-        full = f"{s1_dir}/image_{frame_id}_l.png" if s1_dir else None
-        source = full if full and os.path.isfile(full) else bundle.source_fpaths[position]
-        img = Image.open(source).convert("RGB") if source else Image.fromarray(np.asarray(bundle.rgbs[position]))
-        scale = max_side / max(img.size)
-        if scale < 1.0:
-            img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
-        draw = ImageDraw.Draw(img)
-        draw.rectangle([0, 0, 190, 44], fill=(0, 0, 0))
-        draw.text((12, 14), f"OPTION {option}", fill=(0, 255, 0))
-        fpath = str(tmp_dir / f"option_{option}_frame_{frame_id}.png")
-        img.save(fpath)
-        fpaths.append(fpath)
-    return fpaths
-
 
 def _ask_codex(cfg, prompt: str, image_fpaths: Sequence[str], sel_cfg: dict[str, Any]) -> str:
     from simfoundry.models.codex_vlm import CodexVLM
@@ -722,17 +700,19 @@ def select_with_codex(
     """Codex chooses the frame and the support surface among every candidate position;
     None when the call fails or the answer is unusable.
 
-    With `sam3`, the choice goes down Codex's ranking to the first frame whose support
-    surface SAM3 can segment where Codex boxed it: a frame whose support cannot be
-    segmented would leave stage 3 to guess another surface.
+    With `sam3`, the choice goes down Codex's ranking to the first frame stage 3 can use
+    (`_support_problem`): its support surface segments where Codex boxed it, and its plane
+    is within stage 3's roll limit. Otherwise stage 3 would guess another surface, or stop.
     """
-    from PIL import Image
     from simfoundry.utils.prompt_utils import prompt_codex_frame_and_support
 
     ask_fn = ask_fn or _ask_codex
     frame_ids = [int(bundle.frame_ids[position]) for position in candidates]
     try:
-        images = _codex_candidate_images(cfg, bundle, frame_ids, int(sel_cfg["vlm_max_side"]))
+        images = _write_vlm_candidate_images(
+            bundle, frame_ids, cfg.s3_ground.out_dir, int(sel_cfg["vlm_max_side"]),
+            full_res_dir=OmegaConf.select(cfg, "s1_zed.out_dir"),
+        )
         text = ask_fn(cfg, prompt_codex_frame_and_support(len(frame_ids), sel_cfg["task"]), images, sel_cfg)
     except Exception as exc:
         logger.warning("Codex frame selection failed (%s).", exc)

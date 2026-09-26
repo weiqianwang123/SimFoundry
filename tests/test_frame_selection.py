@@ -440,7 +440,7 @@ def _stub_codex(monkeypatch, answer):
             raise answer
         return answer
 
-    monkeypatch.setattr(frame_selection, "_codex_candidate_images", lambda cfg, bundle, ids, side: [f"{i}.png" for i in ids])
+    monkeypatch.setattr(frame_selection, "_write_vlm_candidate_images", lambda bundle, ids, *a, **k: [f"{i}.png" for i in ids])
     monkeypatch.setattr(frame_selection, "_ask_codex", ask)
     return seen
 
