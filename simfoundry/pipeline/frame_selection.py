@@ -423,7 +423,9 @@ def score_frame(
     score.support_coverage = float(mask.mean())
 
     points = compute_point_cloud_from_depth(depth=depth, K=K).reshape(-1, 3)
-    support_points = points[mask.reshape(-1)]
+    # Zero depth is no measurement (e.g. a robot cut out of the depth): it would back-project
+    # onto the camera centre and drag the plane fit through it.
+    support_points = points[mask.reshape(-1) & (depth.reshape(-1) > 0)]
     if len(support_points) < 100:
         score.eligible = False
         score.reject_reason = "support mask too small to fit a plane"

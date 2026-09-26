@@ -270,9 +270,11 @@ def main(cfg):
     else:
         floor_mask = masks[0][0]            # (H, W)
 
-    # Only keep points belonging to the floor masks
-    pts = compute_point_cloud_from_depth(depth, K).reshape(-1, 3)[floor_mask.flatten()]
-    rgbs = rgb.reshape(-1, 3)[floor_mask.flatten()] / 255.0
+    # Only keep points belonging to the floor masks. Zero depth means no measurement (e.g. a
+    # robot cut out of RGB-D input); such pixels would back-project onto the camera centre.
+    keep = floor_mask.flatten() & (np.asarray(depth).flatten() > 0)
+    pts = compute_point_cloud_from_depth(depth, K).reshape(-1, 3)[keep]
+    rgbs = rgb.reshape(-1, 3)[keep] / 255.0
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
     plane_model, inliers = pcd.segment_plane(distance_threshold=0.01, ransac_n=3, num_iterations=1000)

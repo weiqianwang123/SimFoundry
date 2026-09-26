@@ -1665,6 +1665,13 @@ def main(cfg):
                 logger.warning(f"Skipping object '{phrase}' because eroded mask has no valid pixels.")
                 skipped_objects.append({"phrase": phrase, "reason": "empty_eroded_mask"})
                 continue
+            # Zero depth means no measurement (e.g. RGB-D input with holes, or a robot
+            # cut out of it); such pixels would back-project onto the camera centre.
+            mask_eroded_resized_unpadded &= current_depth > 0
+            if not np.any(mask_eroded_resized_unpadded):
+                logger.warning(f"Skipping object '{phrase}' because its mask has no depth.")
+                skipped_objects.append({"phrase": phrase, "reason": "no_depth_in_mask"})
+                continue
 
             obj_pc = current_pc[mask_eroded_resized_unpadded]
             obj_rgb = rgb_resized_unpadded[mask_eroded_resized_unpadded] / 255

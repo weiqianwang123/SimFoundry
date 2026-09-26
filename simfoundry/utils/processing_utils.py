@@ -1154,7 +1154,10 @@ def denoise_obj_point_cloud_v2(
 
     # 1. Downsample the object point cloud
     # We attempt to normalize the target density (assuming equally spaced points) according to its convex hull surface area
-    ch, _ = pcd_obj.compute_convex_hull()
+    try:
+        ch, _ = pcd_obj.compute_convex_hull()
+    except RuntimeError:  # degenerate (coincident or coplanar points): no volume
+        return pcd_obj.select_by_index([]), np.array([], dtype=int)
     ch_surface_area_cm2 = ch.get_surface_area() * (100 ** 2)     # m^2 -> cm^2
     # obb_extent = pcd_obj.get_oriented_bounding_box().extent
     # pcd_vol = np.prod(obb_extent) * (100 ** 3)       # in m^3 -> cm^3
