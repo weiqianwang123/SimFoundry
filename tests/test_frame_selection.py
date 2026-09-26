@@ -410,3 +410,116 @@ def test_score_frame_rejects_a_frame_with_no_support_surface(tmp_path):
     score = frame_selection.score_frame(0, _fake_bundle(1), _EmptySAM3(), cfg, selection_cfg(cfg))
     assert not score.eligible
     assert "support surface" in score.reject_reason
+
+
+# --------------------------------------------------------------------------------------
+# Codex mode: frame and support surface
+# --------------------------------------------------------------------------------------
+
+CODEX_ANSWER = json.dumps({
+    "option": 3,
+    "ranking": [3, 1, 3, 9],
+    "objects": ["mug", "marker"],
+    "support": {"description": "white square side table", "box_2d": [400, 300, 900, 700]},
+    "reason": "the side table and both objects are largest and unoccluded in option 3",
+})
+
+
+def _codex_cfg(tmp_path, **overrides):
+    cfg = make_cfg(tmp_path)
+    cfg.s3_ground.frame_selection = {"mode": "codex", "write_debug_sheet": False, **overrides}
+    return cfg
+
+
+def _stub_codex(monkeypatch, answer):
+    seen = {}
+
+    def ask(cfg, prompt, images, sel_cfg):
+        seen.update(prompt=prompt, images=list(images), reasoning=sel_cfg["codex_reasoning"])
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(frame_selection, "_codex_candidate_images", lambda cfg, bundle, ids, side: [f"{i}.png" for i in ids])
+    monkeypatch.setattr(frame_selection, "_ask_codex", ask)
+    return seen
+
+
+def test_selection_cfg_accepts_the_codex_mode(tmp_path):
+    sel = selection_cfg(_codex_cfg(tmp_path))
+    assert sel["mode"] == "codex" and sel["task"] is None and sel["codex_reasoning"] == "xhigh"
+
+
+def test_codex_mode_picks_frame_and_support_without_scoring(tmp_path, monkeypatch):
+    cfg = _codex_cfg(tmp_path, task="Place the marker in the red mug")
+    seen = _stub_codex(monkeypatch, CODEX_ANSWER)
+    monkeypatch.setattr(frame_selection, "score_frame", lambda *a: pytest.fail("no scoring in codex mode"))
+    bundle = _fake_bundle(4)
+    bundle.frame_ids = [4, 9, 11, 12]
+
+    selection = frame_selection.select_canonical_frame(
+        cfg, sam3=None, bundle=bundle, codex_fn=frame_selection.select_with_codex,
+    )
+    assert selection.selected_idx == 11 and selection.decided_by == "codex"
+    assert selection.support == {"description": "white square side table", "box_2d": [400.0, 300.0, 900.0, 700.0]}
+    assert seen["images"] == ["4.png", "9.png", "11.png", "12.png"]  # every candidate, no shortlist
+    assert "Place the marker in the red mug" in seen["prompt"] and seen["reasoning"] == "xhigh"
+    usable = sorted((s for s in selection.scores if s.eligible), key=lambda s: -s.score)
+    assert [s.idx for s in usable] == [11, 4]  # the ranking, as scores
+    assert {s.idx for s in selection.scores if not s.eligible} == {9, 12}
+
+    write_selection(cfg, selection)
+    assert load_selection(cfg)["support"]["description"] == "white square side table"
+
+
+def test_codex_mode_falls_back_to_hybrid_when_codex_fails(tmp_path, monkeypatch):
+    cfg = _codex_cfg(tmp_path)
+    _stub_codex(monkeypatch, RuntimeError("codex exited 1"))
+    _patch_scores(monkeypatch, {i: _score(i, object_coverage=0.004 * (i + 1)) for i in range(4)})
+    selection = select_canonical_frame(cfg, sam3=None, bundle=_fake_bundle(), refine_fn=lambda *a: (None, "declined"))
+    assert selection.selected_idx == 3 and selection.mode == "hybrid" and selection.support is None
+
+
+@pytest.mark.parametrize(
+    "text, option, has_support",
+    [
+        (CODEX_ANSWER, 3, True),
+        ("Here you go:\n" + CODEX_ANSWER + "\nDone.", 3, True),
+        (json.dumps({"option": 2, "support": {"description": "table", "box_2d": [900, 0, 100, 1000]}}), 2, False),
+        (json.dumps({"option": 1}), 1, False),
+        (json.dumps({"option": 7}), None, False),
+        ("option 2", None, False),
+    ],
+)
+def test_parse_codex_selection(text, option, has_support):
+    answer = frame_selection.parse_codex_selection(text, n_options=4)
+    if option is None:
+        assert answer is None
+        return
+    assert answer["option"] == option and answer["ranking"][0] == option
+    assert (answer["support"] is not None) == has_support
+
+
+class _FakeSAM3:
+    """Two surfaces: a large one on the left, a smaller one on the right."""
+
+    def predict_segmentation(self, pil_img, text_prompt):
+        width, height = pil_img.size
+        masks = np.zeros((2, 1, height, width), bool)
+        masks[0, 0, :, : width // 2] = True
+        masks[1, 0, height // 2:, 3 * width // 4:] = True
+        boxes = np.array([[0, 0, width // 2, height], [3 * width // 4, height // 2, width, height]], float)
+        return masks, boxes, np.array([0.9, 0.8])
+
+
+def test_the_hinted_support_wins_over_the_largest_surface():
+    from PIL import Image
+
+    img = Image.fromarray(np.zeros((100, 200, 3), np.uint8))
+    masks, boxes, logits, phrase = frame_selection.segment_hinted_support(
+        img, _FakeSAM3(), ["white side table", "desk"], box_2d=[500, 750, 1000, 1000],
+    )
+    assert len(masks) == 1 and masks[0, 0, 99, 199] and not masks[0, 0, 0, 0]
+    assert phrase == "white side table"
+    none = frame_selection.segment_hinted_support(img, _FakeSAM3(), ["desk"], box_2d=[0, 0, 5, 5])
+    assert len(none[0]) == 0

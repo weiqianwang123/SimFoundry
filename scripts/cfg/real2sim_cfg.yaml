@@ -111,8 +111,14 @@ s3_ground:    # env: simfoundry
     # heuristic -- geometry/sharpness scoring only, no remote calls
     # vlm       -- VLM chooses among every frame that passes the gates
     # hybrid    -- heuristic short-lists vlm_top_k frames, VLM makes the final call
-    # The VLM step is fail-soft: without credentials it falls back to the heuristic winner.
+    # codex     -- no heuristic: Codex sees every candidate (and `task`) and picks the frame and
+    #              the support surface in it, which stage 3 then segments instead of the largest
+    # The VLM step is fail-soft: without credentials it falls back to the heuristic winner
+    # (codex mode falls back to hybrid).
     mode: hybrid
+    task: null                    # codex mode: what the scene is for, e.g. a robot's instruction
+    codex_reasoning: xhigh        # codex mode: reasoning effort
+    codex_timeout_s: 1800         # codex mode: per call
     max_candidates: 24            # cap on frames scored (evenly strided) to bound SAM3 cost
     min_object_height: 0.015      # m above the support plane before geometry counts as an object
     max_object_height: 0.6        # m above the plane, to exclude walls/people behind the surface

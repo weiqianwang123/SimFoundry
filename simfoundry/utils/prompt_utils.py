@@ -374,6 +374,29 @@ Pick the option that would reconstruct best, judging in this order of priority:
 Please think through your process first via chain-of-thought, explicitly comparing how large and how occluded the smallest object is in each option. Then provide your final answer as the option number, in the format: ANSWER: <option number between 1 and {n_candidates}>"""
 
 
+def prompt_codex_frame_and_support(n_candidates, task=None):
+    if task:
+        interest = (
+            f'The robot\'s task in this scene is: "{task}". The objects of interest are the '
+            "objects this task involves and every other object resting on the same surface."
+        )
+    else:
+        interest = "The objects of interest are the movable objects resting on the surface in front of the robot."
+    return f"""Above are {n_candidates} images, labelled OPTION 1 to OPTION {n_candidates} in their top-left corners. They are frames of one real scene in front of a robot arm, taken by its calibrated cameras: cameras fixed around the scene, and possibly one on the robot's wrist that moves with it. The robot itself may be in view. {interest}
+
+Exactly one of these frames will be used to rebuild the scene in simulation: every object resting on the support surface is cut out of that frame and turned into a 3D mesh, and the support surface is segmented in that frame to fix the ground plane.
+
+Decide:
+1. The support surface: the surface the objects of interest rest on (a table, desk, counter, the floor, ...). Other surfaces may be in view, such as the stand or table the robot is mounted on, or furniture nearby; choose the one the objects of interest stand on, whatever its size.
+2. The frame that rebuilds those objects best: each of them fully visible and not hidden behind another object or the robot; as large in the image as possible (the smallest object matters most); sharp; not cut by the image border; the support surface clearly visible.
+3. In that frame, the support surface: a short description that a text-prompted segmentation model can find (colour, shape, material; e.g. "white square side table"), and its bounding box.
+4. A ranking of every usable option, best first. Leave out options in which the support surface or an object of interest is not properly in view.
+
+Answer with JSON only, in this form:
+{{"option": <number>, "ranking": [<numbers>], "objects": [<short names of the objects of interest>], "support": {{"description": "<text>", "box_2d": [<ymin>, <xmin>, <ymax>, <xmax>]}}, "reason": "<one or two sentences>"}}
+where box_2d is the support surface's bounding box in the chosen option, each value an integer from 0 to 1000 relative to that image's height (y) and width (x)."""
+
+
 def prompt_object_mass_friction(obj_phrase, bounding_box_cm, volume_cm):
     bbox_str = f" x ".join([f"{val:.2f}cm" for val in bounding_box_cm])
     return f"""Shown is a picture of a {obj_phrase}. Please give the estimated mass (kg) and friction (unitless) of the shown object, given that its bounding box dimensions are {bbox_str} and corresponding volume is {volume_cm:.2f}cm^3. Use chain of thought to think through the predicted material and physical properties of the shown object before deciding on the mass and friction. 

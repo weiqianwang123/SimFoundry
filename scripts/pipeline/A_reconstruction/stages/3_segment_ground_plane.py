@@ -21,6 +21,7 @@ from copy import deepcopy
 from simfoundry.pipeline.stage_utils import StageResult, bootstrap_hydra_workdir, finalize_stage
 from simfoundry.pipeline.frame_selection import (
     is_auto_img_idx,
+    segment_hinted_support,
     select_canonical_frame,
     write_selection,
 )
@@ -196,9 +197,11 @@ def main(cfg):
     # (blurry, shot from far away, objects occluding each other) caps the quality of all of
     # them. `img_idx: auto` scores the candidates and commits the winner to disk for the
     # downstream stages; an explicit integer still pins the frame.
+    support_hint = None
     if is_auto_img_idx(cfg.s3_ground.img_idx):
         selection = select_canonical_frame(cfg, sam3)
         img_idx = selection.selected_idx
+        support_hint = selection.support  # codex mode: the surface the objects stand on
         logger.info("Wrote frame selection to %s", write_selection(cfg, selection))
     else:
         img_idx = int(cfg.s3_ground.img_idx)
@@ -229,8 +232,16 @@ def main(cfg):
     rgb_fpath = f"{out_dir}/raw_img.png"
     Image.fromarray(rgb).save(rgb_fpath)
 
-    # Infer floor possibilities
-    masks, boxes_xyxy, logits, phrase = predict_floor_masks(rgb_fpath, sam3, floor_categories, cfg.s3_ground.floor_threshold, cfg.visualize)
+    # Infer floor possibilities: the surface frame selection named, else the categories' largest
+    masks = []
+    if support_hint:
+        masks, boxes_xyxy, logits, phrase = segment_hinted_support(
+            Image.open(rgb_fpath), sam3, [support_hint["description"], *floor_categories], support_hint["box_2d"],
+        )
+        if len(masks) == 0:
+            logger.warning("No segmented surface matches the support frame selection named; using the floor categories.")
+    if len(masks) == 0:
+        masks, boxes_xyxy, logits, phrase = predict_floor_masks(rgb_fpath, sam3, floor_categories, cfg.s3_ground.floor_threshold, cfg.visualize)
 
     if len(masks) == 0:
         print(f"Found no masks for floor categories: {floor_categories} with threshold: {cfg.s3_ground.floor_threshold}.")
