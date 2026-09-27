@@ -3,7 +3,9 @@ defaults:
 #  - arch: ???
   - task: load_scene
 #  - robot: ???
-  - override hydra/hydra_logging: disabled
+  # Hydra's own logging off; `none`, not `disabled`, which disables every logger already
+  # created (the simfoundry.* modules' own), and job_logging cannot re-enable them.
+  - override hydra/hydra_logging: none
   - override hydra/job_logging: custom
 
 # ===== main cfg =====

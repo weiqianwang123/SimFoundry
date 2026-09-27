@@ -137,6 +137,8 @@ class FrameSelection:
     #: codex mode: the support surface in the chosen frame, as {"description": str, "box_2d":
     #: [ymin, xmin, ymax, xmax]} with each value in 0..1000 of the image height / width.
     support: dict[str, Any] | None = None
+    #: codex mode: Codex's answer as it gave it (why the support is what it is).
+    codex_answer: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         def sanitize(value):
@@ -153,6 +155,7 @@ class FrameSelection:
             "vlm_shortlist": [int(i) for i in self.vlm_shortlist],
             "vlm_note": self.vlm_note,
             "support": self.support,
+            "codex_answer": self.codex_answer,
             "scores": [{k: sanitize(v) for k, v in asdict(s).items()} for s in self.scores],
         }
 
@@ -732,6 +735,7 @@ def select_with_codex(
 
     chosen, support, note = answer["option"], None, answer["reason"]
     hint = answer["support"]
+    score_of = {s.idx: s for s in scores}
     if hint is None:
         logger.warning("Codex gave no usable support box; stage 3 will take the largest surface.")
     elif sam3 is None:
@@ -740,14 +744,16 @@ def select_with_codex(
         prompts = [hint["description"], *OmegaConf.select(cfg, "s3_ground.floor_categories", default=[])]
         for option in answer["ranking"]:
             box = hint["boxes"].get(option)
-            if box is None:
-                continue
-            problem = _support_problem(bundle, frame_ids[option - 1], sam3, prompts, box, sel_cfg)
+            problem = (
+                _support_problem(bundle, frame_ids[option - 1], sam3, prompts, box, sel_cfg)
+                if box is not None else "Codex boxed no support in it"
+            )
             if problem is None:
                 if option != chosen:
                     note = f"{note} [option {chosen} unusable; took option {option}, next in Codex's ranking]"
                 chosen, support = option, {"description": hint["description"], "box_2d": box}
                 break
+            score_of[frame_ids[option - 1]].reject_reason = f"support: {problem}"
             logger.warning("Option %s (frame %s) unusable: %s.", option, frame_ids[option - 1], problem)
         if support is None:
             logger.warning("Codex's support surface could not be segmented in any ranked frame.")
@@ -762,6 +768,7 @@ def select_with_codex(
         vlm_shortlist=frame_ids,
         vlm_note=note,
         support=support,
+        codex_answer=text,
     )
 
 

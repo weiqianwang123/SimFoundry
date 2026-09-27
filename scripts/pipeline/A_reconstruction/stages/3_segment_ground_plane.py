@@ -252,16 +252,14 @@ def main(cfg):
             print("Trying with LLM categories")
             masks, boxes_xyxy, logits, phrase = predict_masks_with_llm(rgb_fpath, cfg, sam3)
 
-    if len(masks) == 0:
-        if use_interactive:
-            print("Trying with LLM categories")
-            masks, boxes_xyxy, logits, phrase = predict_masks_with_llm(rgb_fpath, cfg, sam3)
-        else:
-            print("LLM categories also failed. Falling back to interactive point-click segmentation.")
-            masks, boxes_xyxy, logits, phrase = predict_masks_interactive(rgb_fpath, sam3)
-
+    # The interactive tool either returns a mask or raises; without it nothing asks a person
+    # (a headless run would wait on a window forever).
     n_masks = len(masks)
-    assert n_masks > 0, f"Expected at least one bounding box amongst floor categories: {floor_categories}, but found none!"
+    if n_masks == 0:
+        raise RuntimeError(
+            f"No support surface in frame {img_idx}: none of the floor categories {list(floor_categories)} "
+            "nor the LLM's segments (s3_ground.use_interactive_segmentation=true lets a person click it)."
+        )
 
     # Annotate images with masks
     np_img = np.array(Image.open(rgb_fpath))

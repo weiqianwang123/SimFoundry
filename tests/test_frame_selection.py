@@ -561,6 +561,11 @@ def test_codex_mode_goes_down_the_ranking_to_a_segmentable_support(tmp_path, mon
     assert selection.support == {"description": "white table", "box_2d": [0.0, 0.0, 1000.0, 1000.0]}
     assert "took option 2" in selection.vlm_note
     assert "option 1 unusable" in selection.vlm_note
+    # frame_selection.json says why: Codex's own answer, and each passed-over option's problem.
+    payload = selection.to_payload()
+    assert payload["codex_answer"] == answer
+    reasons = {s["idx"]: s["reject_reason"] for s in payload["scores"]}
+    assert reasons == {0: "support: support surface not segmentable", 1: None, 2: None}
     # Low-confidence masks count while matching the box, and the threshold is restored.
     assert set(sam3.thresholds) == {0.2} and sam3.model.confidence_threshold == 0.5
 
@@ -587,3 +592,18 @@ def test_codex_mode_skips_a_frame_whose_support_plane_is_rolled(tmp_path, monkey
     selection = frame_selection.select_with_codex(cfg, bundle, [0, 1], selection_cfg(cfg), _PickySAM3())
     assert selection.selected_idx == 1 and "option 1 unusable" in selection.vlm_note
 
+
+
+def test_the_reconstruction_config_keeps_the_module_loggers_enabled():
+    """Hydra configures its own logging before the job's, and `disable_existing_loggers`
+    there disables every logger created at import time (the simfoundry.* modules' own,
+    such as this module's), which the job's logging cannot enable again."""
+    from hydra import compose, initialize_config_dir
+
+    from simfoundry import CFG_DIR
+
+    with initialize_config_dir(config_dir=CFG_DIR, version_base="1.3"):
+        cfg = compose("real2sim_cfg", return_hydra_config=True)
+    assert cfg.hydra.hydra_logging.disable_existing_loggers is False
+    assert cfg.hydra.job_logging.disable_existing_loggers is False
+    assert cfg.hydra.job_logging.loggers.simfoundry.level == "INFO"
